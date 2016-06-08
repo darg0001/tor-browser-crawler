@@ -2,10 +2,11 @@ import argparse
 import ConfigParser
 import sys
 import traceback
+import pickle
 from contextlib import contextmanager
 from logging import INFO, DEBUG
 from os import stat, chdir
-from os.path import isfile, join
+from os.path import isfile, join, abspath
 from shutil import copyfile
 from sys import maxsize, argv
 from urlparse import urlparse
@@ -29,7 +30,14 @@ def run():
     build_crawl_dirs()
 
     # Read URLs
-    url_list = read_list_urls(args.url_file, args.start, args.stop)
+    if isfile(args.urls):
+	    url_list = read_list_urls(args.urls, args.start, args.stop)
+    else:
+        try:
+            url_list = args.urls.split(',')
+        except Exception as e:
+            wl_log.error("ERROR: expects a string with comma-separated list "
+                         "of URLs of a path to file")
     host_list = [urlparse(url).hostname for url in url_list]
 
     # Configure logger
@@ -44,10 +52,13 @@ def run():
     # Configure browser
     ffprefs = ut.get_dict_subconfig(config, args.config, "ffpref")
     ffprefs = ut.set_dict_value_types(ffprefs)
+    print(ffprefs)
+    addons_path = abspath(args.addons_dir) if args.addons_dir else None
     driver = TorBrowserWrapper(cm.TBB_DIR,
                                tbb_logfile_path=cm.DEFAULT_FF_LOG,
                                tor_cfg=USE_RUNNING_TOR,
                                pref_dict=ffprefs,
+                               addons_dir=addons_path,
                                socks_port=int(torrc_config['socksport']),
                                canvas_allowed_hosts=host_list)
 
@@ -58,8 +69,13 @@ def run():
                          screenshots=args.screenshots)
 
     # Configure crawl
-    job_config = ut.get_dict_subconfig(config, args.config, "job")
-    job = crawler_mod.CrawlJob(job_config, url_list)
+    if args.recover_file is not None and isfile(args.recover_file):
+        with open(args.recover_file) as fchkpt:
+            job = pickle.load(fchkpt)
+            wl_log.info("Job recovered: %s" % str(job))
+    else:
+        job_config = ut.get_dict_subconfig(config, args.config, "job")
+        job = crawler_mod.CrawlJob(job_config, url_list)
 
     # Run display
     xvfb_display = setup_virtual_display(args.virtual_display)
@@ -71,9 +87,11 @@ def run():
     except KeyboardInterrupt:
         wl_log.warning("Keyboard interrupt! Quitting...")
         sys.exit(-1)
+    except Exception as e:
+	wl_log.error("ERROR: unknown exception while crawling: %s" % e)
     finally:
-        driver.quit()
-        controller.quit()
+        #driver.quit()
+        #controller.quit()
         # Post crawl
         post_crawl()
 
@@ -81,6 +99,7 @@ def run():
         ut.stop_xvfb(xvfb_display)
 
     # die
+    wl_log.info("[tbcrawler] the crawl has finished.")
     sys.exit(0)
 
 def setup_virtual_display(virt_display):
@@ -131,8 +150,9 @@ def parse_arguments():
     parser = argparse.ArgumentParser(description='Crawl a list of URLs in multiple batches.')
 
     # List of urls to be crawled
-    parser.add_argument('-u', '--url-file', required=True,
-                        help='Path to the file that contains the list of URLs to crawl.',
+    parser.add_argument('-u', '--urls', required=True,
+                        help='Path to the file that contains the list of URLs to crawl,'
+                             ' or a comma-separated list of URLs.',
                         default=cm.LOCALIZED_DATASET)
     parser.add_argument('-t', '--type',
                         choices=cm.CRAWLER_TYPES,
@@ -141,6 +161,9 @@ def parse_arguments():
     parser.add_argument('-o', '--output',
                         help='Directory to dump the results (default=./results).',
                         default=cm.CRAWL_DIR)
+    parser.add_argument('-a', '--addons_dir',
+                        help='Directory with the add-ons to be installed (default=None).',
+                        default=None)
     parser.add_argument('-c', '--config',
                         help="Crawler tor driver and controller configurations.",
                         choices=config.sections(),
@@ -151,6 +174,9 @@ def parse_arguments():
     parser.add_argument('-v', '--verbose', action='store_true',
                         help='increase output verbosity',
                         default=False)
+    parser.add_argument('-r', '--recover-file',
+                        help="File with checkpoint to recover from.",
+                        default=None)
 
     # Crawler features
     parser.add_argument('-x', '--virtual-display',

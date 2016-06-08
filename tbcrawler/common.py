@@ -16,7 +16,7 @@ STREAM_CLOSE_TIMEOUT = 20  # wait 20 seconds before raising an alarm signal
 # otherwise we had many cases where get_streams hanged
 
 # timeouts
-SOFT_VISIT_TIMEOUT = 120     # timeout used by selenium and dumpcap
+SOFT_VISIT_TIMEOUT = 40     # timeout used by selenium and dumpcap
 # signal based hard timeout in case soft timeout fails
 HARD_VISIT_TIMEOUT = SOFT_VISIT_TIMEOUT + 10
 
@@ -53,6 +53,7 @@ TEST_FILES_DIR = join(TEST_DIR, 'files')
 TBB_DIR = join(BASE_DIR, 'tor-browser_en-US')
 # Top URLs localized (DE) to prevent the effect of localization
 LOCALIZED_DATASET = join(ETC_DIR, "localized-urls-100-top.csv")
+DEFAULT_ADDONS_DIR = join(BASE_DIR, "addons")
 
 VBOX_GATEWAY_IP = "10.0.2.2"  # default gateway IP of VirtualBox
 LXC_GATEWAY_IP = "10.0.3.1"  # default gateway IP of LXC

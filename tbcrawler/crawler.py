@@ -1,8 +1,11 @@
-from os import rename
-from os.path import join
+from os import rename, remove
+from tempfile import gettempdir
+from os.path import join, isfile
 from pprint import pformat
 from urlparse import urlsplit
 from time import sleep
+from shutil import move
+import pickle
 import stem
 import random
 
@@ -10,7 +13,7 @@ from selenium.common.exceptions import TimeoutException, WebDriverException
 
 import common as cm
 import utils as ut
-from dumputils import Sniffer
+from dumputils import Sniffer, DumpcapTimeoutError
 from log import wl_log
 
 
@@ -28,13 +31,17 @@ class CrawlerBase(object):
         self.job = job
         wl_log.info("Starting new crawl")
         wl_log.info(pformat(self.job))
-        for self.job.batch in xrange(self.job.batches):
+        while self.job.batch < self.job.batches:
             wl_log.info("**** Starting batch %s ***" % self.job.batch)
             with self.controller.launch():
                 self.__do_batch()
             sleep(float(self.job.config['pause_between_batches']))
+            self.job.batch += 1
 
     def post_visit(self):
+        pass
+
+    def cleanup_visit(self):
         pass
 
     def __do_batch(self):
@@ -43,32 +50,39 @@ class CrawlerBase(object):
         If the controller is configured to not pollute the profile, each
         restart forces to switch the entry guard.
         """
-        for self.job.site in xrange(len(self.job.urls)):
+        while self.job.site < len(self.job.urls):
             if len(self.job.url) > cm.MAX_FNAME_LENGTH:
                 wl_log.warning("URL is too long: %s" % self.job.url)
                 continue
 
             self.__do_visits()
             sleep(float(self.job.config['pause_between_sites']))
+            self.job.site += 1
+        if self.job.site == len(self.job.urls):
+            self.job.site = 0
 
     def __do_visits(self):
-        for self.job.visit in xrange(self.job.visits):
+        while self.job.visit < self.job.visits:
             wl_log.info("*** Visit #%s to %s ***", self.job.visit, self.job.url)
-            try:
-                ut.create_dir(self.job.path)
+	    try:
+	        ut.create_dir(self.job.path)
+	        self.save_checkpoint()
                 with self.driver.launch():
                     self.set_page_load_timeout()
-
-                    self.__do_instance()
-
-                    self.get_screenshot_if_enabled()
-                    self.post_visit()
-            except (cm.HardTimeoutException, TimeoutException):
-                wl_log.error("Visit to %s has timed out!", self.job.url)
-            except ValueError as e:
-                raise e
+                    try:
+                        self.__do_instance()
+                        self.get_screenshot_if_enabled()
+                    except (cm.HardTimeoutException, TimeoutException, DumpcapTimeoutError):
+                        wl_log.error("Visit to %s has timed out!", self.job.url)
+		    else:
+		        self.post_visit()
+                    finally:
+                        self.cleanup_visit()
             except Exception as exc:
-                wl_log.error("Unknown exception: %s", exc)
+                wl_log.error("Unknown exception: %s" % repr(exc))
+            self.job.visit += 1
+        if self.job.visit == self.job.visits:
+            self.job.visit = 0
 
     def __do_instance(self):
         with Sniffer(device=self.device,
@@ -76,11 +90,21 @@ class CrawlerBase(object):
             sleep(1)  # make sure dumpcap is running
             with ut.timeout(cm.HARD_VISIT_TIMEOUT):
                 self.driver.get(self.job.url)
-                page_source = self.driver.page_source.strip().lower()
+                page_source = self.driver.page_source.encode('utf-8').strip().lower()
+                with open(join(self.job.path, "source.html"), "w") as fhtml:
+                    fhtml.write(page_source)
                 if ut.has_captcha(page_source):
                     wl_log.warning('captcha found')
                     self.job.add_captcha()
                 sleep(float(self.job.config['pause_in_site']))
+
+    def save_checkpoint(self):
+        fname = join(cm.CRAWL_DIR, "job.chkpt")
+        if isfile(fname):
+            remove(fname)
+        with open(fname, "w") as f:
+            pickle.dump(self.job, f)
+        wl_log.info("New checkpoint at %s" % fname)
 
     def set_page_load_timeout(self):
         try:
@@ -91,16 +115,33 @@ class CrawlerBase(object):
 
     def get_screenshot_if_enabled(self):
         if self.screenshots:
+            # selenium's bug: https://github.com/seleniumhq/selenium-google-code-issue-archive/issues/3596
+            # set a timeout for getting a screenshot in case we hit the bug.
             try:
-                self.driver.get_screenshot_as_file(self.job.png_file)
-            except WebDriverException:
-                wl_log.error("Cannot get screenshot.")
+                with ut.timeout(5):
+                    try:
+                        self.driver.get_screenshot_as_file(self.job.png_file)
+                    except WebDriverException:
+                        wl_log.error("Cannot get screenshot.")
+            except cm.HardTimeoutException:
+                wl_log.error("Function to take the screenshot has timed out!")
 
 
 class CrawlerWebFP(CrawlerBase):
+
+    def cleanup_visit(self):
+        addon_logfile = join(gettempdir(), 'tbb-http.log')
+        if isfile(addon_logfile):
+            remove(addon_logfile)
+
     def post_visit(self):
         sleep(float(self.job.config['pause_between_visits']))
         self.filter_packets_without_guard_ip()
+        # move addon log to file
+        addon_logfile = join(gettempdir(), 'tbb-http.log')
+        if isfile(addon_logfile):
+	    move(addon_logfile, join(self.job.path, 'tbb-http.log'))
+
 
     def filter_packets_without_guard_ip(self):
         guard_ips = set([ip for ip in self.controller.get_all_guard_ips()])
@@ -205,5 +246,7 @@ class CrawlJob(object):
         return join(cm.CRAWL_DIR, "_".join(map(str, attributes)))
 
     def __repr__(self):
-        return "Batches: %s, Sites: %s, Visits: %s" \
-            % (self.batches, len(self.urls), self.visits)
+        return "Batches: %s/%s, Sites: %s/%s, Visits: %s/%s" \
+            % (self.batch + 1, self.batches,
+               self.site + 1, len(self.urls),
+               self.visit + 1, self.visits)
